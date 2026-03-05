@@ -1,0 +1,12 @@
+Revision history for Net-Async-NATS
+
+{{$NEXT}}
+
+  - Initial release
+  - Publish/Subscribe messaging
+  - Request/Reply with auto-generated inbox subjects
+  - Wildcard subscriptions (* and >)
+  - Queue group subscriptions
+  - Automatic PING/PONG keepalive handling
+  - Reconnect with subscription replay
+  - Server INFO processing
