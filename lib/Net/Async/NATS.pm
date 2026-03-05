@@ -1,6 +1,6 @@
 package Net::Async::NATS;
 # ABSTRACT: Async NATS client for IO::Async
-
+our $VERSION = '0.002';
 use strict;
 use warnings;
 use parent 'IO::Async::Notifier';
