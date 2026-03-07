@@ -1,6 +1,6 @@
 package Net::Async::NATS::Subscription;
 # ABSTRACT: Represents a NATS subscription
-our $VERSION = '0.002';
+our $VERSION = '0.003';
 use strict;
 use warnings;
 
