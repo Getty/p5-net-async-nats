@@ -221,7 +221,9 @@ async sub connect {
     $self->{_stream} = $stream;
     $self->add_child($stream);
 
-    $stream->connect(
+    # Retain the TCP connect future — if GC'd before resolution, the
+    # stream never gets its handle and on_read never fires.
+    $self->{_tcp_connect_future} = $stream->connect(
         host    => $self->{host},
         service => $self->{port},
     )->on_fail(sub {
@@ -463,7 +465,7 @@ sub _on_read {
         }
 
         # INFO {...}
-        if ($line =~ /\AINFO\s+(\{.*\})\z/i) {
+        if ($line =~ /\AINFO\s+(\{.*\})\s*\z/i) {
             my $info = eval { decode_json($1) } // {};
             $self->{_server_info} = $info;
             $self->_handle_info($info);
@@ -531,6 +533,7 @@ sub _handle_info {
     $self->_write("PING\r\n");
 
     $self->{_connected} = 1;
+    delete $self->{_tcp_connect_future};  # no longer needed
 
     if (my $f = delete $self->{_connect_future}) {
         $f->done($info) unless $f->is_ready;
