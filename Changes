@@ -1,5 +1,7 @@
 Revision history for Net-Async-NATS
 
+{{$NEXT}}
+
 0.003     2026-04-07 00:59:57Z
 
   - Fix reconnect Future retention: the Future returned by the internal
