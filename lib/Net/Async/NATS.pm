@@ -208,6 +208,14 @@ async sub connect {
 
     croak "Already connected" if $self->{_connected};
 
+    # Clean up any stale future from a previous failed connect
+    if (my $f = delete $self->{_connect_future}) {
+        $f->cancel unless $f->is_ready;
+    }
+    if (my $f = delete $self->{_tcp_connect_future}) {
+        $f->cancel unless $f->is_ready;
+    }
+
     $self->{_connect_future} = $self->loop->new_future;
 
     my $stream = IO::Async::Stream->new(
@@ -571,6 +579,11 @@ sub _on_disconnect {
     my ($self, $reason) = @_;
     $self->{_connected} = 0;
 
+    # Abort any pending connect Future so its async sub unwinds cleanly
+    if (my $f = delete $self->{_connect_future}) {
+        $f->fail("disconnected: $reason") unless $f->is_ready;
+    }
+
     if (my $cb = $self->{on_disconnect}) {
         $cb->($self, $reason);
     }
@@ -589,48 +602,61 @@ sub _on_error {
 
 sub _reconnect {
     my ($self) = @_;
-    my $attempts = 0;
-    my $max = $self->{max_reconnect_attempts};
-    my $wait = $self->{reconnect_wait};
+
+    # Guard against overlapping reconnect chains
+    return if $self->{_reconnect_future};
+
+    $self->{_reconnect_attempts} = 0;
+    $self->_reconnect_attempt;
+}
+
+sub _reconnect_attempt {
+    my ($self) = @_;
+
+    return if $self->{_connected};
+    if (++$self->{_reconnect_attempts} > $self->{max_reconnect_attempts}) {
+        delete $self->{_reconnect_future};
+        $self->_on_error("reconnect failed after $self->{max_reconnect_attempts} attempts");
+        return;
+    }
 
     weaken(my $weak_self = $self);
 
-    my $try; $try = sub {
-        my $self = $weak_self or return;
-        return if $self->{_connected};
-        return if ++$attempts > $max;
+    # Remove old stream before waiting
+    if (my $old = delete $self->{_stream}) {
+        $self->remove_child($old) if $old->parent;
+    }
 
-        $self->loop->delay_future(after => $wait)->on_done(sub {
+    # Save subscriptions for replay (once, on first attempt)
+    $self->{_saved_subs} //= { %{ $self->{_subscriptions} } };
+    $self->{_subscriptions} = {};
+
+    # Hold the full reconnect-attempt future on the object so nothing is GC'd
+    $self->{_reconnect_future} = $self->loop
+        ->delay_future(after => $self->{reconnect_wait})
+        ->then(sub {
+            my $self = $weak_self or return Future->done;
+            return Future->done if $self->{_connected};
+            return $self->connect;
+        })
+        ->on_done(sub {
             my $self = $weak_self or return;
-            return if $self->{_connected};
-
-            # Remove old stream
-            if (my $old = delete $self->{_stream}) {
-                $self->remove_child($old) if $old->parent;
+            # Replay subscriptions on the new connection
+            my $saved = delete $self->{_saved_subs} || {};
+            for my $sub (values %$saved) {
+                my $cmd = defined $sub->queue
+                    ? "SUB " . $sub->subject . " " . $sub->queue . " " . $sub->sid . "\r\n"
+                    : "SUB " . $sub->subject . " " . $sub->sid . "\r\n";
+                $self->_write($cmd);
+                $self->{_subscriptions}{$sub->sid} = $sub;
             }
-
-            # Save subscriptions for replay
-            my %saved_subs = %{ $self->{_subscriptions} };
-
-            eval {
-                my $f = $self->connect;
-                $f->on_done(sub {
-                    my $self = $weak_self or return;
-                    # Replay subscriptions
-                    for my $sub (values %saved_subs) {
-                        my $cmd = defined $sub->queue
-                            ? "SUB " . $sub->subject . " " . $sub->queue . " " . $sub->sid . "\r\n"
-                            : "SUB " . $sub->subject . " " . $sub->sid . "\r\n";
-                        $self->_write($cmd);
-                        $self->{_subscriptions}{$sub->sid} = $sub;
-                    }
-                });
-                $f->on_fail(sub { $try->() });
-            };
+            delete $self->{_reconnect_future};
+        })
+        ->on_fail(sub {
+            my $self = $weak_self or return;
+            delete $self->{_reconnect_future};
+            $self->_reconnect_attempt;  # try again
         });
-    };
-
-    $try->();
 }
 
 sub _random_id {
